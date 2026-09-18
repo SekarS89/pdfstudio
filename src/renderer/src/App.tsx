@@ -252,7 +252,9 @@ export default function App(): JSX.Element {
   const [fontSize, setFontSize] = useState(12)
   const [drawStyle, setDrawStyle] = useState<DrawStyle>(DEFAULT_DRAW_STYLE)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [status, setStatus] = useState('Open a PDF to begin.')
+  /** Status line, kept per tab — see setStatus below. */
+  const [statusByTab, setStatusByTab] = useState<Record<string, string>>({})
+  const [idleStatus, setIdleStatus] = useState('Open a PDF to begin.')
   const [busy, setBusy] = useState(false)
   const [toasts, setToasts] = useState<Toast[]>([])
   const [confirmCloseId, setConfirmCloseId] = useState<string | null>(null)
@@ -326,6 +328,23 @@ export default function App(): JSX.Element {
   const closeSearch = useCallback(() => patchSearch({ open: false }), [patchSearch])
   const setSearchQuery = useCallback((q: string) => patchSearch({ query: q }), [patchSearch])
   const setSearchFuzzy = useCallback((f: boolean) => patchSearch({ fuzzy: f }), [patchSearch])
+
+  const status = activeId ? statusByTab[activeId] ?? 'Ready.' : idleStatus
+
+  /**
+   * The status line belongs to a document, not to the window: switching tabs
+   * shows that document's own line instead of whatever happened last. Work
+   * that outlives a tab switch (saving, printing, the background speed-up)
+   * passes the tab it started on, so its progress stays where it belongs.
+   */
+  const setStatus = useCallback((msg: string, tabId?: string) => {
+    const id = tabId ?? activeIdRef.current
+    if (!id) {
+      setIdleStatus(msg)
+      return
+    }
+    setStatusByTab((prev) => ({ ...prev, [id]: msg }))
+  }, [])
 
   const toast = useCallback((msg: string, kind: Toast['kind'] = 'info'): void => {
     const id = ++toastSeq
@@ -553,7 +572,8 @@ export default function App(): JSX.Element {
       setActiveId(newTab.id)
       setStatus(
         `${name} — ${doc.numPages} page${doc.numPages === 1 ? '' : 's'}` +
-          (unlocked ? ' · restrictions removed' : '')
+          (unlocked ? ' · restrictions removed' : ''),
+        newTab.id
       )
 
       // form-field detection runs in the background so big docs open instantly
@@ -567,7 +587,10 @@ export default function App(): JSX.Element {
                 : t
             )
           )
-          setStatus(`${name} — ${doc.numPages} pages · ${fields.length} fillable field${fields.length === 1 ? '' : 's'}`)
+          setStatus(
+            `${name} — ${doc.numPages} pages · ${fields.length} fillable field${fields.length === 1 ? '' : 's'}`,
+            newTab.id
+          )
         })
         .catch((e) => console.warn('field detection failed', e))
 
@@ -655,6 +678,12 @@ export default function App(): JSX.Element {
         delete next[id]
         return next
       })
+      setStatusByTab((m) => {
+        if (!(id in m)) return m
+        const next = { ...m }
+        delete next[id]
+        return next
+      })
       delete imageDocRef.current[id]
       ocrTokenRef.current[id] = (ocrTokenRef.current[id] || 0) + 1 // abort any in-flight OCR
       delete ocrTokenRef.current[id]
@@ -682,7 +711,7 @@ export default function App(): JSX.Element {
     const tab = tabsRef.current.find((t) => t.id === activeIdRef.current)
     if (!tab) return
     setBusy(true)
-    setStatus('Removing document restrictions…')
+    setStatus('Removing document restrictions…', tab.id)
     try {
       const res = await window.api.unlockPdf(tab.srcBytes)
       if (res.ok) {
@@ -696,7 +725,7 @@ export default function App(): JSX.Element {
       else toast('Unlock failed: ' + res.error, 'err')
     } finally {
       setBusy(false)
-      setStatus('Ready.')
+      setStatus('Ready.', tab.id)
     }
   }, [buildTab, toast])
 
@@ -775,22 +804,22 @@ export default function App(): JSX.Element {
         const cached = await window.api.optCacheGet(hash).catch(() => null)
         if (cached && cached.byteLength) {
           if (await applyFastDoc(tabId, cached)) {
-            setStatus('Ready. (using cached fast copy)')
-            window.setTimeout(() => setStatus('Ready.'), 4000)
+            setStatus('Ready. (using cached fast copy)', tabId)
+            window.setTimeout(() => setStatus('Ready.', tabId), 4000)
           }
           return
         }
       }
 
-      setStatus('Heavy drawing detected — speeding up in the background…')
+      setStatus('Heavy drawing detected — speeding up in the background…', tabId)
       try {
         const { bytes, stats } = await optimizePdfInWorker(tab.srcBytes, {}, (p) => {
-          setStatus(`Speeding up in the background… ${p.label}`)
+          setStatus(`Speeding up in the background… ${p.label}`, tabId)
         })
         const savedOps =
           stats.segmentsBefore - stats.segmentsAfter + stats.wrappersFlattened * 2 + stats.strokesMerged
         if (savedOps < 10000) {
-          setStatus('Ready.')
+          setStatus('Ready.', tabId)
           return
         }
         // Cache first: even if the tab has since closed, the next open wins.
@@ -806,7 +835,7 @@ export default function App(): JSX.Element {
         // Never surface this as an error — the document still works, just slowly.
         console.warn('background speed-up failed', e)
       } finally {
-        setStatus('Ready.')
+        setStatus('Ready.', tabId)
       }
     },
     [applyFastDoc, toast]
@@ -849,7 +878,7 @@ export default function App(): JSX.Element {
       return
     }
     setBusy(true)
-    setStatus('Building a faster copy…')
+    setStatus('Building a faster copy…', tab.id)
     try {
       const hash = await sha256Hex(tab.srcBytes).catch(() => null)
       let bytes: ArrayBuffer | null = null
@@ -862,7 +891,7 @@ export default function App(): JSX.Element {
       }
       if (!bytes) {
         const res = await optimizePdfInWorker(tab.srcBytes, {}, (p) => {
-          setStatus(`Building a faster copy… ${p.label}`)
+          setStatus(`Building a faster copy… ${p.label}`, tab.id)
         })
         bytes = res.bytes
         const st = res.stats
@@ -888,7 +917,7 @@ export default function App(): JSX.Element {
       toast('Could not build a faster copy: ' + ((e as Error)?.message || 'unknown error'), 'err')
     } finally {
       setBusy(false)
-      setStatus('Ready.')
+      setStatus('Ready.', tab.id)
     }
   }, [buildTab, toast])
 
@@ -912,7 +941,7 @@ export default function App(): JSX.Element {
       const tab = tabsRef.current.find((t) => t.id === tabId)
       if (!tab) return false
       setBusy(true)
-      setStatus('Saving…')
+      setStatus('Saving…', tabId)
       try {
         const bytes = await bakeTab(tab)
         const buf = toArrayBuffer(bytes)
@@ -923,13 +952,13 @@ export default function App(): JSX.Element {
             return false
           }
           setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, dirty: false } : t)))
-          setStatus('Saved to ' + tab.srcPath)
+          setStatus('Saved to ' + tab.srcPath, tabId)
           toast('Saved.', 'ok')
           return true
         }
         const path = await window.api.savePdf(buf, tab.model.fileName)
         if (!path) {
-          setStatus('Save cancelled.')
+          setStatus('Save cancelled.', tabId)
           return false
         }
         const newName = path.split(/[\\/]/).pop() || tab.model.fileName
@@ -938,7 +967,7 @@ export default function App(): JSX.Element {
             t.id === tabId ? { ...t, dirty: false, srcPath: path, model: { ...t.model, fileName: newName } } : t
           )
         )
-        setStatus('Saved to ' + path)
+        setStatus('Saved to ' + path, tabId)
         toast('Saved.', 'ok')
         return true
       } catch (err) {
@@ -969,7 +998,7 @@ export default function App(): JSX.Element {
     if (!tab) return
     const n = countEditable(tab.model.annotations)
     setBusy(true)
-    setStatus('Flattening…')
+    setStatus('Flattening…', tab.id)
     try {
       const bytes = await bakeTab(tab, true)
       const buf = toArrayBuffer(bytes)
@@ -994,7 +1023,7 @@ export default function App(): JSX.Element {
       toast('Flatten failed: ' + errMsg(err), 'err')
     } finally {
       setBusy(false)
-      setStatus('Ready.')
+      setStatus('Ready.', tab.id)
     }
   }, [bakeTab, buildTab, patchActive, toast])
 
@@ -1042,16 +1071,18 @@ export default function App(): JSX.Element {
     const tab = tabsRef.current.find((t) => t.id === activeIdRef.current)
     if (!tab) return
     setBusy(true)
-    setStatus('Preparing to print…')
+    setStatus('Preparing to print…', tab.id)
     try {
       const bytes = await bakeTab(tab)
-      const html = await buildPrintHtml(bytes, (d, t) => setStatus(`Preparing page ${d} of ${t} for print…`))
+      const html = await buildPrintHtml(bytes, (d, t) =>
+        setStatus(`Preparing page ${d} of ${t} for print…`, tab.id)
+      )
       const res = await window.api.printHtml(html)
       if (!res.ok && res.error && !/cancel/i.test(res.error)) toast('Print failed: ' + res.error, 'err')
-      setStatus('Ready.')
+      setStatus('Ready.', tab.id)
     } catch (err) {
       toast('Print failed: ' + errMsg(err), 'err')
-      setStatus('Ready.')
+      setStatus('Ready.', tab.id)
     } finally {
       setBusy(false)
     }
@@ -1139,7 +1170,7 @@ export default function App(): JSX.Element {
       const tab = tabsRef.current.find((t) => t.id === activeIdRef.current)
       if (!tab) return
       setBusy(true)
-      setStatus(label)
+      setStatus(label, tab.id)
       try {
         const src = await PDFDocument.load(tab.srcBytes, { ignoreEncryption: true })
         const before = src.getPageCount()
@@ -1186,10 +1217,10 @@ export default function App(): JSX.Element {
             )
           })
           .catch(() => {})
-        setStatus(`Inserted ${added} page${added === 1 ? '' : 's'}.`)
+        setStatus(`Inserted ${added} page${added === 1 ? '' : 's'}.`, tab.id)
       } catch (err) {
         toast(label.replace('…', '') + ' failed: ' + errMsg(err), 'err')
-        setStatus('Ready.')
+        setStatus('Ready.', tab.id)
       } finally {
         setBusy(false)
       }
@@ -1569,7 +1600,7 @@ export default function App(): JSX.Element {
       toast('Nothing is cropped off this image yet.', 'info')
       return
     }
-    setStatus('Trimming image…')
+    setStatus('Trimming image…', c.tab.id)
     const shownAt = previewDrawIndex(
       c.tab.model.annotations.filter(
         (a): a is ImageEditAnnot => a.type === 'imgedit' && a.leafId === c.leaf.id
@@ -1582,13 +1613,13 @@ export default function App(): JSX.Element {
         'This image could not be decoded, so the crop stays as a clipping region — it still prints and exports correctly.',
         'info'
       )
-      setStatus('')
+      setStatus('', c.tab.id)
       return
     }
     const stored = await cropToStoredImage(source, crop)
     if (!stored) {
       toast('Could not re-encode the cropped image.', 'err')
-      setStatus('')
+      setStatus('', c.tab.id)
       return
     }
     const rec: ImageEditAnnot = {
@@ -1608,7 +1639,7 @@ export default function App(): JSX.Element {
         : [...m.annotations, rec]
     }))
     patchActive({ imageCrop: false })
-    setStatus(`Image trimmed to ${stored.width} × ${stored.height} px`)
+    setStatus(`Image trimmed to ${stored.width} × ${stored.height} px`, c.tab.id)
   }, [imageContext, commitModel, patchActive, toast])
 
   // Decode the selected picture only when the crop guide needs it — the decode
@@ -1805,7 +1836,7 @@ export default function App(): JSX.Element {
       const sheet = SHEET_SIZES.find((s) => s.id === opts.sizeId)
       if (!tab || !sheet) return
       setBusy(true)
-      setStatus('Changing page size…')
+      setStatus('Changing page size…', tab.id)
       try {
         // the viewer's own page rotations are not in the file yet, so tell the
         // resizer about them or a rotated page would be sized the wrong way up
@@ -1824,7 +1855,7 @@ export default function App(): JSX.Element {
           extraRotation
         })
         if (res.changed === 0) {
-          setStatus('')
+          setStatus('', tab.id)
           toast('Those pages are already that size.', 'info')
           return
         }
@@ -1842,11 +1873,12 @@ export default function App(): JSX.Element {
           dirty: true
         })
         setStatus(
-          `${res.changed} page${res.changed === 1 ? '' : 's'} resized to ${sheet.label.split(' — ')[0]}`
+          `${res.changed} page${res.changed === 1 ? '' : 's'} resized to ${sheet.label.split(' — ')[0]}`,
+          tab.id
         )
       } catch (e) {
         toast(`Could not change the page size: ${errMsg(e)}`, 'err')
-        setStatus('')
+        setStatus('', tab.id)
       } finally {
         setBusy(false)
       }
@@ -2460,9 +2492,10 @@ export default function App(): JSX.Element {
   const runCombine = useCallback(async () => {
     const items = (combineItems ?? []).filter((x) => !x.error)
     if (!items.length) return
+    const startedOn = activeIdRef.current ?? undefined
     setCombining(true)
     setBusy(true)
-    setStatus(`Combining ${items.length} file${items.length === 1 ? '' : 's'}…`)
+    setStatus(`Combining ${items.length} file${items.length === 1 ? '' : 's'}…`, startedOn)
     try {
       const bytes = toArrayBuffer(await buildCombined(items))
       const first = items[0].name.replace(/\.(pdf|png|jpe?g)$/i, '')
@@ -2472,10 +2505,10 @@ export default function App(): JSX.Element {
       toast(`Combined ${items.length} file${items.length === 1 ? '' : 's'} into a new document — Save it (Ctrl+S) to choose where it goes.`, 'ok')
     } catch (err) {
       toast('Combine failed: ' + errMsg(err), 'err')
-      setStatus('Ready.')
     } finally {
       setCombining(false)
       setBusy(false)
+      if (startedOn) setStatus('Ready.', startedOn)
     }
   }, [combineItems, buildTab, toast])
 
