@@ -6,6 +6,8 @@ interface Props {
   count: number
   current: number // 0-based index, -1 if none
   searching: boolean
+  /** Bumped when Find is invoked again — puts the cursor back in the box. */
+  focusSeq: number
   onQuery: (q: string) => void
   onFuzzy: (f: boolean) => void
   onNext: () => void
@@ -18,7 +20,7 @@ export default function SearchBar(props: Props): JSX.Element {
   useEffect(() => {
     inputRef.current?.focus()
     inputRef.current?.select()
-  }, [])
+  }, [props.focusSeq])
 
   return (
     <div className="searchbar">

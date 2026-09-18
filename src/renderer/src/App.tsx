@@ -129,6 +129,15 @@ interface Toast {
   kind: 'info' | 'ok' | 'err'
 }
 
+/** A tab's own find bar: whether it is showing, and what it is looking for. */
+interface SearchState {
+  open: boolean
+  query: string
+  fuzzy: boolean
+}
+
+const NO_SEARCH: SearchState = { open: false, query: '', fuzzy: false }
+
 type MarkupKind = MarkupAnnot['kind']
 
 const DEFAULT_COLORS = ['#111111', '#b91c1c', '#1d4ed8', '#0a7d29', '#d97706', '#7c3aed']
@@ -257,10 +266,10 @@ export default function App(): JSX.Element {
     () => localStorage.getItem('pdfstudio.activeSig') || null
   )
 
-  // search
-  const [searchOpen, setSearchOpen] = useState(false)
-  const [searchQuery, setSearchQuery] = useState('')
-  const [searchFuzzy, setSearchFuzzy] = useState(false)
+  // search — kept per tab, so a find in one document does not follow you into
+  // another one. Each tab remembers its own bar, query and match mode.
+  const [searchByTab, setSearchByTab] = useState<Record<string, SearchState>>({})
+  const [searchFocus, setSearchFocus] = useState(0)
   const [matches, setMatches] = useState<SearchMatch[]>([])
   const [currentMatch, setCurrentMatch] = useState(-1)
   const [searching, setSearching] = useState(false)
@@ -299,6 +308,24 @@ export default function App(): JSX.Element {
   zoomRef.current = active?.zoom ?? 1.25
   sigsRef.current = sigs
   activeSigRef.current = sigs.find((s) => s.id === activeSigId) || null
+
+  const { open: searchOpen, query: searchQuery, fuzzy: searchFuzzy } =
+    (activeId && searchByTab[activeId]) || NO_SEARCH
+
+  /** Write to the active tab's find bar; a no-op when no document is open. */
+  const patchSearch = useCallback((patch: Partial<SearchState>) => {
+    const id = activeIdRef.current
+    if (!id) return
+    setSearchByTab((prev) => ({ ...prev, [id]: { ...NO_SEARCH, ...prev[id], ...patch } }))
+  }, [])
+  const openSearch = useCallback(() => {
+    if (!activeIdRef.current) return
+    patchSearch({ open: true })
+    setSearchFocus((n) => n + 1) // Ctrl+F on an already-open bar re-selects the query
+  }, [patchSearch])
+  const closeSearch = useCallback(() => patchSearch({ open: false }), [patchSearch])
+  const setSearchQuery = useCallback((q: string) => patchSearch({ query: q }), [patchSearch])
+  const setSearchFuzzy = useCallback((f: boolean) => patchSearch({ fuzzy: f }), [patchSearch])
 
   const toast = useCallback((msg: string, kind: Toast['kind'] = 'info'): void => {
     const id = ++toastSeq
@@ -622,6 +649,12 @@ export default function App(): JSX.Element {
       const next = prev.filter((t) => t.id !== id)
       delete scrollPosRef.current[id]
       delete histRef.current[id]
+      setSearchByTab((m) => {
+        if (!(id in m)) return m
+        const next = { ...m }
+        delete next[id]
+        return next
+      })
       delete imageDocRef.current[id]
       ocrTokenRef.current[id] = (ocrTokenRef.current[id] || 0) + 1 // abort any in-flight OCR
       delete ocrTokenRef.current[id]
@@ -2709,7 +2742,7 @@ export default function App(): JSX.Element {
 
       if (mod && key === 'f') {
         e.preventDefault()
-        if (active) setSearchOpen(true)
+        openSearch()
         return
       }
       if (mod && key === 'w') {
@@ -2767,7 +2800,7 @@ export default function App(): JSX.Element {
       }
 
       if (e.key === 'Escape') {
-        if (searchOpen) setSearchOpen(false)
+        if (searchOpen) closeSearch()
         // Escape backs out of a crop before it drops the selection, so it is
         // always one step "less committed" rather than starting over.
         if (active?.imageCrop) {
@@ -2841,6 +2874,8 @@ export default function App(): JSX.Element {
   }, [
     active,
     searchOpen,
+    openSearch,
+    closeSearch,
     tool,
     deleteAnnot,
     setEditingId,
@@ -3112,7 +3147,7 @@ export default function App(): JSX.Element {
         onRotateCurrent={rotateCurrent}
         onRotatePages={() => setRotateOpen(true)}
         onDeletePages={() => setDeleteOpen(true)}
-        onFind={() => setSearchOpen(true)}
+        onFind={openSearch}
         canUndo={canUndo}
         canRedo={canRedo}
         onUndo={undo}
@@ -3178,11 +3213,12 @@ export default function App(): JSX.Element {
             count={matches.length}
             current={currentMatch}
             searching={searching}
+            focusSeq={searchFocus}
             onQuery={setSearchQuery}
             onFuzzy={setSearchFuzzy}
             onNext={nextMatch}
             onPrev={prevMatch}
-            onClose={() => setSearchOpen(false)}
+            onClose={closeSearch}
           />
         )}
         {active && model ? (
